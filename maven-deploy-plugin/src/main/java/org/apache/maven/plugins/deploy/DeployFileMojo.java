@@ -44,6 +44,8 @@ import org.apache.maven.model.building.DefaultModelBuildingRequest;
 import org.apache.maven.model.building.ModelBuildingRequest;
 import org.apache.maven.model.building.ModelProblem.Severity;
 import org.apache.maven.model.building.ModelProblemCollector;
+import org.apache.maven.model.building.ModelSource;
+import org.apache.maven.model.building.StringModelSource;
 import org.apache.maven.model.io.xpp3.MavenXpp3Reader;
 import org.apache.maven.model.io.xpp3.MavenXpp3Writer;
 import org.apache.maven.model.validation.ModelValidator;
@@ -52,10 +54,13 @@ import org.apache.maven.plugin.MojoFailureException;
 import org.apache.maven.plugins.annotations.Component;
 import org.apache.maven.plugins.annotations.Mojo;
 import org.apache.maven.plugins.annotations.Parameter;
+import org.apache.maven.project.DefaultProjectBuildingRequest;
 import org.apache.maven.project.MavenProject;
 import org.apache.maven.project.MavenProjectHelper;
-import org.apache.maven.project.ProjectBuildingHelper;
+import org.apache.maven.project.ProjectBuilder;
+import org.apache.maven.project.ProjectBuildingException;
 import org.apache.maven.project.artifact.ProjectArtifactMetadata;
+import org.apache.maven.shared.artifact.DefaultArtifactCoordinate;
 import org.apache.maven.shared.artifact.deploy.ArtifactDeployerException;
 import org.apache.maven.shared.repository.RepositoryManager;
 import org.codehaus.plexus.util.FileUtils;
@@ -74,17 +79,18 @@ import org.codehaus.plexus.util.xml.pull.XmlPullParserException;
 public class DeployFileMojo
     extends AbstractDeployMojo
 {
-    /**
-     * The default Maven project created when building the plugin
-     */
-    @Parameter( defaultValue = "${project}", readonly = true, required = true )
-    private MavenProject project;
 
     /**
-     * Used for attaching the source and javadoc jars to the project.
+     * Used for attaching the artifacts to deploy to the project.
      */
     @Component
     private MavenProjectHelper projectHelper;
+    
+    /**
+     * Used for creating the project to which the artifacts to deploy will be attached.
+     */
+    @Component
+    private ProjectBuilder projectBuilder;
 
     /**
      * GroupId of the artifact to be deployed. Retrieved from POM file if specified.
@@ -216,9 +222,6 @@ public class DeployFileMojo
     @Component
     private RepositoryManager repoManager;
     
-    @Component
-    private ProjectBuildingHelper projectBuildingHelper;
-    
     void initProperties()
         throws MojoExecutionException
     {
@@ -341,15 +344,28 @@ public class DeployFileMojo
             throw new MojoExecutionException( "No transfer protocol found." );
         }
 
-        // Create the artifact
-        Artifact artifact =
-            artifactFactory.createArtifactWithClassifier( groupId, artifactId, version, packaging, classifier );
-
-        if ( file.equals( getLocalRepoFile( artifact ) ) )
+        if ( file.equals( getLocalRepoFile() ) )
         {
             throw new MojoFailureException( "Cannot deploy artifact from the local repository: " + file );
         }
-
+        
+        MavenProject project = createMavenProject();
+        
+        List<Artifact> deployableArtifacts = new ArrayList<Artifact>();
+        
+        Artifact artifact = null;
+        if ( classifier == null )
+        {
+            artifact = project.getArtifact();
+            artifact.setFile( file );
+            deployableArtifacts.add( artifact );
+        }
+        else
+        {
+            projectHelper.attachArtifact( project, packaging, classifier, file );
+            artifact = project.getAttachedArtifacts().get( 0 );
+        }
+        
         // Upload the POM if requested, generating one if need be
         if ( !"pom".equals( packaging ) )
         {
@@ -364,40 +380,20 @@ public class DeployFileMojo
                 artifact.addMetadata( metadata );
             }
         }
-
+        
         if ( updateReleaseInfo )
         {
             artifact.setRelease( true );
         }
-
-        project.setArtifact( artifact );
-
-        artifact.setFile( file );
         
-        artifact.setRepository( deploymentRepository );
-        
-        List<Artifact> deployableArtifacts = new ArrayList<Artifact>(); 
-        
-        deployableArtifacts.add( artifact );
-
         if ( sources != null )
         {
-            Artifact sourcesArtifact =
-                artifactFactory.createArtifactWithClassifier( groupId, artifactId, version, "jar", "sources" );
-
-            sourcesArtifact.setFile( sources );
-
-            deployableArtifacts.add( sourcesArtifact );
+            projectHelper.attachArtifact( project, "jar", "sources", sources );
         }
 
         if ( javadoc != null )
         {
-            Artifact javadocArtifact =
-                artifactFactory.createArtifactWithClassifier( groupId, artifactId, version, "jar", "javadoc" );
-
-            javadocArtifact.setFile( javadoc );
-
-            deployableArtifacts.add( javadocArtifact );
+            projectHelper.attachArtifact( project, "jar", "javadoc", javadoc );
         }
 
         if ( files != null )
@@ -451,15 +447,13 @@ public class DeployFileMojo
                 }
                 if ( file.isFile() )
                 {
-                    if ( StringUtils.isWhitespace( classifiers.substring( ci, nci ) ) )
+                    String type = types.substring( ti, nti ).trim();
+                    String classifier = classifiers.substring( ci, nci ).trim();
+                    if ( classifier.isEmpty() )
                     {
-                        projectHelper.attachArtifact( project, types.substring( ti, nti ).trim(), file );
+                        classifier = null;
                     }
-                    else
-                    {
-                        projectHelper.attachArtifact( project, types.substring( ti, nti ).trim(),
-                                                      classifiers.substring( ci, nci ).trim(), file );
-                    }
+                    projectHelper.attachArtifact( project, type, classifier, file );
                 }
                 else
                 {
@@ -481,10 +475,8 @@ public class DeployFileMojo
                 throw new MojoExecutionException( "You must specify 'files' if you specify 'classifiers'" );
             }
         }
-
-        List<Artifact> attachedArtifacts = project.getAttachedArtifacts();
-
-        for ( Artifact attached : attachedArtifacts )
+        
+        for ( Artifact attached : project.getAttachedArtifacts() )
         {
             deployableArtifacts.add( attached );
         }
@@ -498,17 +490,53 @@ public class DeployFileMojo
             throw new MojoExecutionException( e.getMessage(), e );
         }
     }
+    
+    /**
+     * Creates a Maven project in-memory from the user-supplied groupId, artifactId, version and packaging.
+     * This project serves as basis to attach the artifacts to deploy to.
+     * 
+     * @return The artifact coordinate.
+     * @throws MojoFailureException 
+     */
+    private MavenProject createMavenProject() 
+        throws MojoFailureException
+    {
+        ModelSource modelSource = new StringModelSource( 
+                "<project>"
+                + "<modelVersion>4.0.0</modelVersion>"
+                + "<groupId>" + groupId + "</groupId>"
+                + "<artifactId>" + artifactId + "</artifactId>"
+                + "<version>" + version + "</version>"
+                + "<packaging>" + packaging + "</packaging>"
+              + "</project>" );
+        DefaultProjectBuildingRequest buildingRequest =
+            new DefaultProjectBuildingRequest( getSession().getProjectBuildingRequest() );
+        buildingRequest.setProcessPlugins( false );
+        try
+        {
+            return projectBuilder.build( modelSource, buildingRequest ).getProject();
+        }
+        catch ( ProjectBuildingException e )
+        {
+            throw new MojoFailureException( e.getMessage(), e );
+        }
+    }
 
     /**
-     * Gets the path of the specified artifact within the local repository. Note that the returned path need not exist
-     * (yet).
+     * Gets the path of the specified artifact coordinate within the local repository.Note that the returned path 
+     * need not exist (yet).
      * 
-     * @param artifact The artifact whose local repo path should be determined, must not be <code>null</code>.
      * @return The absolute path to the artifact when installed, never <code>null</code>.
      */
-    private File getLocalRepoFile( Artifact artifact )
+    private File getLocalRepoFile()
     {
-        String path = repoManager.getPathForLocalArtifact( getSession().getProjectBuildingRequest(), artifact );
+        DefaultArtifactCoordinate coordinate = new DefaultArtifactCoordinate();
+        coordinate.setGroupId( groupId );
+        coordinate.setArtifactId( artifactId );
+        coordinate.setVersion( version );
+        coordinate.setClassifier( classifier );
+        coordinate.setExtension( packaging );
+        String path = repoManager.getPathForLocalArtifact( getSession().getProjectBuildingRequest(), coordinate );
         return new File( repoManager.getLocalRepositoryBasedir( getSession().getProjectBuildingRequest() ), path );
     }
 
