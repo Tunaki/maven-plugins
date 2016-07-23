@@ -495,19 +495,19 @@ public class DeployFileMojo
      * Creates a Maven project in-memory from the user-supplied groupId, artifactId, version and packaging.
      * This project serves as basis to attach the artifacts to deploy to.
      * 
-     * @return The artifact coordinate.
-     * @throws MojoFailureException 
+     * @return The created Maven project.
+     * @throws MojoFailureException When building the project failed.
      */
     private MavenProject createMavenProject() 
         throws MojoFailureException
     {
         ModelSource modelSource = new StringModelSource( 
                 "<project>"
-                + "<modelVersion>4.0.0</modelVersion>"
-                + "<groupId>" + groupId + "</groupId>"
-                + "<artifactId>" + artifactId + "</artifactId>"
-                + "<version>" + version + "</version>"
-                + "<packaging>" + packaging + "</packaging>"
+              +   "<modelVersion>4.0.0</modelVersion>"
+              +   "<groupId>" + groupId + "</groupId>"
+              +   "<artifactId>" + artifactId + "</artifactId>"
+              +   "<version>" + version + "</version>"
+              +   "<packaging>" + packaging + "</packaging>"
               + "</project>" );
         DefaultProjectBuildingRequest buildingRequest =
             new DefaultProjectBuildingRequest( getSession().getProjectBuildingRequest() );
@@ -523,8 +523,8 @@ public class DeployFileMojo
     }
 
     /**
-     * Gets the path of the specified artifact coordinate within the local repository.Note that the returned path 
-     * need not exist (yet).
+     * Gets the path of the artifact constructed from the supplied groupId, artifactId, version, classifier
+     * and packaging within the local repository. Note that the returned path need not exist (yet).
      * 
      * @return The absolute path to the artifact when installed, never <code>null</code>.
      */

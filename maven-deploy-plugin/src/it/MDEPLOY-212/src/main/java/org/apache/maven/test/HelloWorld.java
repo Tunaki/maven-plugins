@@ -27,12 +27,11 @@ public class HelloWorld
 
     /**
      * Main method
-     * @param args
+     * @param args Arguments
      */
     public static void main( String[] args )
     {
         System.out.println( "Hello world" );
-
     }
 
 }
